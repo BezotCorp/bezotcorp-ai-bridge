@@ -7,7 +7,7 @@ use crate::{
     openai::ToolCallChunk,
     sse::{
         INACTIVITY_TIMEOUT, RAW_TOOL_CALL_PASSTHROUGH_THRESHOLD, build_tool_call_sse,
-        collect_sse_content, request_has_recent_tool_result,
+        collect_sse_content,
     },
 };
 use axum::{
@@ -90,7 +90,6 @@ async fn handle_ollama_stream(
     }
 
     let log_dir = state.log_dir.clone();
-    let allow_normalize = !request_has_recent_tool_result(&request);
 
     let stream = async_stream::stream! {
         let mut upstream = response.bytes_stream();
@@ -149,7 +148,6 @@ async fn handle_ollama_stream(
             let trimmed = content.trim_start();
 
             if !maybe_raw_json_tool_call {
-
                 if trimmed.starts_with(TOOL_CALL_BEGIN_JSON) || trimmed.starts_with(JSON_BEGIN_FORMAT) {
                     maybe_raw_json_tool_call = true;
                 } else if trimmed.starts_with(TOOL_CALL_CONTAINER) {
@@ -165,7 +163,7 @@ async fn handle_ollama_stream(
                 }
             }
 
-            if maybe_raw_json_tool_call && allow_normalize {
+            if maybe_raw_json_tool_call {
                 if let Some(tool_call) = ToolCallChunk::try_normalize_raw_tool_call(&content, &request) {
                     let sse = build_tool_call_sse(
                         &request.model,
@@ -192,10 +190,6 @@ async fn handle_ollama_stream(
                     yield Ok::<_, Infallible>(Bytes::from(mem::take(&mut buffered_sse)));
                     continue;
                 }
-            } else if maybe_raw_json_tool_call && !allow_normalize {
-                passthrough = true;
-                yield Ok::<_, Infallible>(Bytes::from(mem::take(&mut buffered_sse)));
-                continue;
             }
         }
 

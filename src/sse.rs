@@ -1,4 +1,4 @@
-use crate::{chat_reques::ChatRequest, openai::ToolCallChunk};
+use crate::openai::ToolCallChunk;
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -9,9 +9,6 @@ pub const RAW_TOOL_CALL_PASSTHROUGH_THRESHOLD: usize = 4_096;
 /// Si aucun octet n'arrive d'Ollama pendant cette durée, on considère le
 /// stream mort et on coupe proprement plutôt que de laisser Kilo attendre.
 pub const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(90);
-
-/// Nombre de messages récents à inspecter pour détecter un tool result.
-pub const TOOL_RESULT_LOOKBACK: usize = 8;
 
 pub fn collect_sse_content(
     bytes: &[u8],
@@ -46,21 +43,6 @@ pub fn collect_sse_content(
             content.push_str(delta_content);
         }
     }
-}
-
-pub fn request_has_recent_tool_result(request: &ChatRequest) -> bool {
-    request
-        .rest
-        .get("messages")
-        .and_then(Value::as_array)
-        .map(|messages| {
-            messages
-                .iter()
-                .rev()
-                .take(TOOL_RESULT_LOOKBACK)
-                .any(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
-        })
-        .unwrap_or(false)
 }
 
 pub fn build_tool_call_sse(

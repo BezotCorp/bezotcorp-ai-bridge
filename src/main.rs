@@ -5,6 +5,7 @@ mod logging;
 mod normalizer;
 mod openai;
 mod proxy;
+mod raw_tool_call_scanner;
 mod sse;
 mod tool_spec;
 

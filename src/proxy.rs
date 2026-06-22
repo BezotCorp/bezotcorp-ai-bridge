@@ -1,8 +1,10 @@
+use crate::normalizer::{JSON_BEGIN_FORMAT, TOOL_CALL_BEGIN_JSON, TOOL_CALL_CONTAINER};
 use crate::{
     app_state::AppState,
+    chat_reques::ChatRequest,
     logging::log_bytes,
-    normalizer::{strip_json_fence, try_normalize_raw_tool_call},
-    openai::ChatRequest,
+    normalizer::strip_json_fence,
+    openai::ToolCallChunk,
     sse::{
         INACTIVITY_TIMEOUT, RAW_TOOL_CALL_PASSTHROUGH_THRESHOLD, build_tool_call_sse,
         collect_sse_content, request_has_recent_tool_result,
@@ -147,12 +149,11 @@ async fn handle_ollama_stream(
             let trimmed = content.trim_start();
 
             if !maybe_raw_json_tool_call {
-                const JSON_FENCE: &str = "```json";
 
-                if trimmed.starts_with(JSON_FENCE) || trimmed.starts_with('{') {
+                if trimmed.starts_with(TOOL_CALL_BEGIN_JSON) || trimmed.starts_with(JSON_BEGIN_FORMAT) {
                     maybe_raw_json_tool_call = true;
-                } else if trimmed.starts_with("```") {
-                    if !JSON_FENCE.starts_with(trimmed) {
+                } else if trimmed.starts_with(TOOL_CALL_CONTAINER) {
+                    if !TOOL_CALL_BEGIN_JSON.starts_with(trimmed) {
                         passthrough = true;
                         yield Ok::<_, Infallible>(Bytes::from(mem::take(&mut buffered_sse)));
                         continue;
@@ -165,7 +166,7 @@ async fn handle_ollama_stream(
             }
 
             if maybe_raw_json_tool_call && allow_normalize {
-                if let Some(tool_call) = try_normalize_raw_tool_call(&content, &request) {
+                if let Some(tool_call) = ToolCallChunk::try_normalize_raw_tool_call(&content, &request) {
                     let sse = build_tool_call_sse(
                         &request.model,
                         first_chunk.clone(),

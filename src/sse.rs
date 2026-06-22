@@ -1,4 +1,4 @@
-use crate::openai::{ChatRequest, ToolCallChunk};
+use crate::{chat_reques::ChatRequest, openai::ToolCallChunk};
 use serde_json::{Value, json};
 use std::time::Duration;
 

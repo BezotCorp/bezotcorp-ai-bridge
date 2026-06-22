@@ -1,9 +1,7 @@
-use std::collections::HashSet;
-
+use crate::{chat_request::ChatRequest, normalizer::strip_json_fence};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use crate::{chat_reques::ChatRequest, normalizer::strip_json_fence};
+use std::collections::HashSet;
 
 #[derive(Debug, Deserialize)]
 struct RawToolCall {
@@ -20,9 +18,19 @@ pub struct ToolCallChunk {
 }
 
 impl ToolCallChunk {
-    pub fn try_normalize_raw_tool_call(content: &str, request: &ChatRequest) -> Option<Self> {
+    pub fn try_normalize_raw_tool_call(content: &str, request: &ChatRequest) -> Option<Vec<Self>> {
         let cleaned = strip_json_fence(content.trim())?;
-        let raw: RawToolCall = serde_json::from_str(cleaned).ok()?;
+
+        let raw_calls: Vec<RawToolCall> = if cleaned.trim_start().starts_with('[') {
+            serde_json::from_str(cleaned).ok()?
+        } else {
+            let single: RawToolCall = serde_json::from_str(cleaned).ok()?;
+            vec![single]
+        };
+
+        if raw_calls.is_empty() {
+            return None;
+        }
 
         let allowed = request
             .tools
@@ -31,22 +39,27 @@ impl ToolCallChunk {
             .map(|tool| tool.function.name.as_str())
             .collect::<HashSet<_>>();
 
-        if !allowed.contains(raw.name.as_str()) {
-            return None;
+        let mut chunks = Vec::with_capacity(raw_calls.len());
+
+        for (index, raw) in raw_calls.into_iter().enumerate() {
+            if !allowed.contains(raw.name.as_str()) {
+                return None;
+            }
+            if !raw.arguments.is_object() {
+                return None;
+            }
+
+            chunks.push(Self {
+                id: format!("call_ollama_proxy_{}", index + 1),
+                call_type: "function".to_string(),
+                function: ToolCallFunctionChunk {
+                    name: raw.name,
+                    arguments: serde_json::to_string(&raw.arguments).ok()?,
+                },
+            });
         }
 
-        if !raw.arguments.is_object() {
-            return None;
-        }
-
-        Some(Self {
-            id: "call_ollama_proxy_1".to_string(),
-            call_type: "function".to_string(),
-            function: ToolCallFunctionChunk {
-                name: raw.name,
-                arguments: serde_json::to_string(&raw.arguments).ok()?,
-            },
-        })
+        Some(chunks)
     }
 }
 

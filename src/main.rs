@@ -1,5 +1,5 @@
 mod app_state;
-mod chat_reques;
+mod chat_request;
 mod function_spec;
 mod logging;
 mod normalizer;

@@ -1,17 +1,9 @@
-use crate::openai::{ChatRequest, ToolCallChunk};
+use crate::openai::ToolCallChunk;
 use serde_json::{Value, json};
 use std::time::Duration;
 
-/// Au-delà de cette taille de contenu texte accumulé sans JSON valide détecté,
-/// on abandonne la détection de tool-call et on bascule en passthrough.
 pub const RAW_TOOL_CALL_PASSTHROUGH_THRESHOLD: usize = 4_096;
-
-/// Si aucun octet n'arrive d'Ollama pendant cette durée, on considère le
-/// stream mort et on coupe proprement plutôt que de laisser Kilo attendre.
 pub const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(90);
-
-/// Nombre de messages récents à inspecter pour détecter un tool result.
-pub const TOOL_RESULT_LOOKBACK: usize = 8;
 
 pub fn collect_sse_content(
     bytes: &[u8],
@@ -48,26 +40,11 @@ pub fn collect_sse_content(
     }
 }
 
-pub fn request_has_recent_tool_result(request: &ChatRequest) -> bool {
-    request
-        .rest
-        .get("messages")
-        .and_then(Value::as_array)
-        .map(|messages| {
-            messages
-                .iter()
-                .rev()
-                .take(TOOL_RESULT_LOOKBACK)
-                .any(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
-        })
-        .unwrap_or(false)
-}
-
 pub fn build_tool_call_sse(
     model: &str,
     first_chunk: Option<Value>,
     usage_chunk: Option<Value>,
-    tool_call: ToolCallChunk,
+    tool_calls: Vec<ToolCallChunk>,
 ) -> String {
     let id = first_chunk
         .as_ref()
@@ -81,6 +58,22 @@ pub fn build_tool_call_sse(
         .and_then(Value::as_i64)
         .unwrap_or(0);
 
+    let announce: Vec<Value> = tool_calls
+        .iter()
+        .enumerate()
+        .map(|(index, tool_call)| {
+            json!({
+                "index": index,
+                "id": tool_call.id,
+                "type": tool_call.call_type,
+                "function": {
+                    "name": tool_call.function.name,
+                    "arguments": ""
+                }
+            })
+        })
+        .collect();
+
     let first = json!({
         "id": id,
         "object": "chat.completion.chunk",
@@ -90,19 +83,24 @@ pub fn build_tool_call_sse(
             "index": 0,
             "delta": {
                 "role": "assistant",
-                "tool_calls": [{
-                    "index": 0,
-                    "id": tool_call.id,
-                    "type": tool_call.call_type,
-                    "function": {
-                        "name": tool_call.function.name,
-                        "arguments": ""
-                    }
-                }]
+                "tool_calls": announce
             },
             "finish_reason": null
         }]
     });
+
+    let args_entries: Vec<Value> = tool_calls
+        .iter()
+        .enumerate()
+        .map(|(index, tool_call)| {
+            json!({
+                "index": index,
+                "function": {
+                    "arguments": tool_call.function.arguments
+                }
+            })
+        })
+        .collect();
 
     let args = json!({
         "id": id,
@@ -112,12 +110,7 @@ pub fn build_tool_call_sse(
         "choices": [{
             "index": 0,
             "delta": {
-                "tool_calls": [{
-                    "index": 0,
-                    "function": {
-                        "arguments": tool_call.function.arguments
-                    }
-                }]
+                "tool_calls": args_entries
             },
             "finish_reason": null
         }]

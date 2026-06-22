@@ -1,9 +1,13 @@
 mod app_state;
+mod chat_request;
+mod function_spec;
 mod logging;
 mod normalizer;
 mod openai;
 mod proxy;
+mod raw_tool_call_scanner;
 mod sse;
+mod tool_spec;
 
 use axum::{
     Router,

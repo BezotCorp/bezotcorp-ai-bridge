@@ -1,65 +1,32 @@
-use crate::openai::{ChatRequest, ToolCallChunk, ToolCallFunctionChunk};
-use serde::Deserialize;
-use serde_json::Value;
-use std::collections::HashSet;
-
-#[derive(Debug, Deserialize)]
-struct RawToolCall {
-    name: String,
-    arguments: Value,
-}
-
-pub fn try_normalize_raw_tool_call(content: &str, request: &ChatRequest) -> Option<ToolCallChunk> {
-    let cleaned = strip_json_fence(content.trim())?;
-    let raw: RawToolCall = serde_json::from_str(cleaned).ok()?;
-
-    let allowed = request
-        .tools
-        .iter()
-        .filter(|tool| tool.tool_type == "function")
-        .map(|tool| tool.function.name.as_str())
-        .collect::<HashSet<_>>();
-
-    if !allowed.contains(raw.name.as_str()) {
-        return None;
-    }
-
-    if !raw.arguments.is_object() {
-        return None;
-    }
-
-    Some(ToolCallChunk {
-        id: "call_ollama_proxy_1".to_string(),
-        call_type: "function".to_string(),
-        function: ToolCallFunctionChunk {
-            name: raw.name,
-            arguments: serde_json::to_string(&raw.arguments).ok()?,
-        },
-    })
-}
+pub(crate) const TOOL_CALL_CONTAINER: &str = "```";
+pub(crate) const TOOL_CALL_BEGIN_JSON: &str = "```json";
+pub(crate) const JSON_BEGIN_FORMAT: &str = "{";
+pub(crate) const JSON_END_FORMAT: &str = "}";
+pub(crate) const JSON_ARRAY_BEGIN_FORMAT: &str = "[";
+pub(crate) const JSON_ARRAY_END_FORMAT: &str = "]";
 
 pub(crate) fn strip_json_fence(input: &str) -> Option<&str> {
-    if input.starts_with("```json") && input.ends_with("```") {
+    if input.starts_with(TOOL_CALL_BEGIN_JSON) && input.ends_with(TOOL_CALL_CONTAINER) {
         return Some(
             input
-                .trim_start_matches("```json")
-                .trim_end_matches("```")
+                .trim_start_matches(TOOL_CALL_BEGIN_JSON)
+                .trim_end_matches(TOOL_CALL_CONTAINER)
                 .trim(),
         );
     }
-
-    if input.starts_with("```") && input.ends_with("```") {
+    if input.starts_with(TOOL_CALL_CONTAINER) && input.ends_with(TOOL_CALL_CONTAINER) {
         return Some(
             input
-                .trim_start_matches("```")
-                .trim_end_matches("```")
+                .trim_start_matches(TOOL_CALL_CONTAINER)
+                .trim_end_matches(TOOL_CALL_CONTAINER)
                 .trim(),
         );
     }
-
-    if input.starts_with('{') && input.ends_with('}') {
+    if input.starts_with(JSON_BEGIN_FORMAT) && input.ends_with(JSON_END_FORMAT) {
         return Some(input);
     }
-
+    if input.starts_with(JSON_ARRAY_BEGIN_FORMAT) && input.ends_with(JSON_ARRAY_END_FORMAT) {
+        return Some(input);
+    }
     None
 }

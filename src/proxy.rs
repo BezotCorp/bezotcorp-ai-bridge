@@ -1,23 +1,11 @@
-use crate::{
-    app_state::AppState,
-    logging::log_bytes,
-    normalizer::{strip_json_fence, try_normalize_raw_tool_call},
-    openai::ChatRequest,
-    sse::{
-        INACTIVITY_TIMEOUT, RAW_TOOL_CALL_PASSTHROUGH_THRESHOLD, build_tool_call_sse,
-        collect_sse_content, request_has_recent_tool_result,
-    },
-};
+use crate::{app_state::AppState, chat_request::ChatRequest, logging::log_bytes};
 use axum::{
     body::{Body, Bytes},
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use futures_util::StreamExt;
-use serde_json::Value;
-use std::{convert::Infallible, mem, sync::Arc};
-use tokio::time::timeout;
+use std::sync::Arc;
 
 pub async fn models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state
@@ -87,123 +75,8 @@ async fn handle_ollama_stream(
         return (status, bytes).into_response();
     }
 
-    let log_dir = state.log_dir.clone();
-    let allow_normalize = !request_has_recent_tool_result(&request);
-
-    let stream = async_stream::stream! {
-        let mut upstream = response.bytes_stream();
-
-        let mut raw = Vec::new();
-        let mut buffered_sse = Vec::new();
-        let mut line_buf: Vec<u8> = Vec::new();
-        let mut content = String::new();
-        let mut first_chunk: Option<Value> = None;
-        let mut usage_chunk: Option<Value> = None;
-
-        let mut maybe_raw_json_tool_call = false;
-        let mut passthrough = false;
-
-        loop {
-            let next = match timeout(INACTIVITY_TIMEOUT, upstream.next()).await {
-                Ok(next) => next,
-                Err(_) => {
-                    log_bytes(&log_dir, "ollama-timeout", &raw);
-                    if !buffered_sse.is_empty() {
-                        yield Ok::<_, Infallible>(Bytes::from(mem::take(&mut buffered_sse)));
-                    }
-                    yield Ok::<_, Infallible>(Bytes::from_static(b"data: [DONE]\n\n"));
-                    return;
-                }
-            };
-
-            let Some(item) = next else {
-                break;
-            };
-
-            let Ok(bytes) = item else {
-                log_bytes(&log_dir, "ollama-stream-error", &raw);
-                if !buffered_sse.is_empty() {
-                    yield Ok::<_, Infallible>(Bytes::from(mem::take(&mut buffered_sse)));
-                }
-                yield Ok::<_, Infallible>(Bytes::from_static(b"data: [DONE]\n\n"));
-                return;
-            };
-
-            raw.extend_from_slice(&bytes);
-
-            if passthrough {
-                yield Ok::<_, Infallible>(bytes);
-                continue;
-            }
-
-            buffered_sse.extend_from_slice(&bytes);
-            line_buf.extend_from_slice(&bytes);
-
-            if let Some(last_newline) = line_buf.iter().rposition(|&b| b == b'\n') {
-                let complete: Vec<u8> = line_buf.drain(..=last_newline).collect();
-                collect_sse_content(&complete, &mut content, &mut first_chunk, &mut usage_chunk);
-            }
-
-            let trimmed = content.trim_start();
-
-            if !maybe_raw_json_tool_call {
-                const JSON_FENCE: &str = "```json";
-
-                if trimmed.starts_with(JSON_FENCE) || trimmed.starts_with('{') {
-                    maybe_raw_json_tool_call = true;
-                } else if trimmed.starts_with("```") {
-                    if !JSON_FENCE.starts_with(trimmed) {
-                        passthrough = true;
-                        yield Ok::<_, Infallible>(Bytes::from(mem::take(&mut buffered_sse)));
-                        continue;
-                    }
-                } else if !trimmed.is_empty() {
-                    passthrough = true;
-                    yield Ok::<_, Infallible>(Bytes::from(mem::take(&mut buffered_sse)));
-                    continue;
-                }
-            }
-
-            if maybe_raw_json_tool_call && allow_normalize {
-                if let Some(tool_call) = try_normalize_raw_tool_call(&content, &request) {
-                    let sse = build_tool_call_sse(
-                        &request.model,
-                        first_chunk.clone(),
-                        usage_chunk.clone(),
-                        tool_call,
-                    );
-
-                    log_bytes(&log_dir, "proxy-normalized-tool-call", sse.as_bytes());
-                    log_bytes(&log_dir, "ollama-response-stream", &raw);
-
-                    yield Ok::<_, Infallible>(Bytes::from(sse));
-                    return;
-                }
-
-                if strip_json_fence(trimmed).is_some() {
-                    passthrough = true;
-                    yield Ok::<_, Infallible>(Bytes::from(mem::take(&mut buffered_sse)));
-                    continue;
-                }
-
-                if content.len() > RAW_TOOL_CALL_PASSTHROUGH_THRESHOLD {
-                    passthrough = true;
-                    yield Ok::<_, Infallible>(Bytes::from(mem::take(&mut buffered_sse)));
-                    continue;
-                }
-            } else if maybe_raw_json_tool_call && !allow_normalize {
-                passthrough = true;
-                yield Ok::<_, Infallible>(Bytes::from(mem::take(&mut buffered_sse)));
-                continue;
-            }
-        }
-
-        log_bytes(&log_dir, "ollama-response-stream", &raw);
-
-        if !buffered_sse.is_empty() {
-            yield Ok::<_, Infallible>(Bytes::from(buffered_sse));
-        }
-    };
+    let stream =
+        crate::raw_tool_call_scanner::scan_ollama_stream(response, request, state.log_dir.clone());
 
     Response::builder()
         .header("content-type", "text/event-stream")
